@@ -2099,7 +2099,7 @@ sub2 <- dat[dat$TA==2,]
 ```
 
 
-```{r, eval = run_lasso,  child = "2018_10_25_Replicate_lasso.Rmd"}
+```{r, eval = run_lasso,  child = "Replicate_lasso.Rmd"}
 ```
 
 
