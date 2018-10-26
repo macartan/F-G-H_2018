@@ -58,7 +58,7 @@ the layouts of Figure 1 and of Figure A3.
 
 ########## OUTPUT FILES ########################################################
 
-This replication code produces the following output files
+This replication code produces the output files listed below.
 
 (7) Replicate_Main.html:
 This is the replication output file produced by 2018_10_25_Replicate_Main. 
