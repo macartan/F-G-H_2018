@@ -1,0 +1,1027 @@
+---
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Table A15 (p. A-36): Covariate Adjusted ITT Estimates
+
+### Lasso Regression for Covariate Selection
+
+We first use the lasso as a principled method to select pre-treatment covariates that are prognostic of outcomes by arm (which are then used to estimate covariate adjusted ITT effects). The code below conducts this covariate selection procedure and produces the output files `misc_covselect_select0.csv`, `misc_covselect_select1.csv`, and `misc_covselect_select2.csv` (which are included in the replication archive). Note: This code chunk takes awhile to run.
+
+```{r covselect, echo=T, eval=T, warning=F}
+
+#------------------------------------------------#
+# Variable selection using lasso
+#------------------------------------------------#
+set.seed(20150210)
+nfolds <- 5
+niter <- 1000  # number of times to shuffle folds
+
+# ============== #
+# Z=0 (control)
+# ============== #
+
+# initialize object to store results
+# nested lists of 9 (one per outcome)
+# one for model selected at lambda.min (cv0.min)
+# another for model selected at lambda.1se (cv0.1se)
+# one for a final set of covs we choose (cv0)
+cv0.min <- cv0.1se <- list()
+cv0 <- list()
+
+# iterate over outcomes
+  for(j in 1:length(Ys)){
+  # cat("\n ******************* Outcome: ", Ys[j] ," ******************* \n", sep="")
+  # pre-process data conditional on outcome of interest
+  if(j %in% 1:3) {
+    subX <- Xs[!(Xs %in% c(wh.vars, bh.vars))]  # if excluding hisp tester FE add: , tbfe
+  } else if(j %in% 4:6) {
+    subX <- Xs[!(Xs %in% c(wb.vars, bh.vars))]  # if excluding black tester FE add: , tafe
+  } else if(j %in% 7:9) {
+    subX <- Xs[!(Xs %in% c(wb.vars, wh.vars))]  # if excluding white tester FE add: , tcfe
+  }
+  temp <- sub0[,names(sub0) %in% c(Ys[j], subX, "ipw")]
+  temp <- temp[apply(temp, 1, function(x) sum(is.na(x))) == 0,]  # kick out missing (required for cv.glmnet)
+    
+  # initialize object to store
+  cv.out <- list()
+  
+  # initialize vector of fold assignments
+  folds0 <- c(rep(1, round(nrow(temp)/nfolds, 0)),
+              rep(2, round(nrow(temp)/nfolds, 0)),
+              rep(3, round(nrow(temp)/nfolds, 0)),
+              rep(4, round(nrow(temp)/nfolds, 0)),
+              rep(5, nrow(temp) - 4*round(nrow(temp)/nfolds, 0) ))
+    
+  # iterate over shuffled fold assignments
+  for(i in 1:niter){
+    # cat(i, " ", sep="")
+    # shuffle folds
+    fold.assign <- folds0[sample(1:nrow(temp), nrow(temp), replace=FALSE)]
+    # lasso
+    cv.out[[i]] <- cv.glmnet(x=as.matrix(temp[,!(names(temp) %in% c(Ys[j], "ipw"))]),
+                             y=as.vector(temp[[Ys[j]]]),
+                             weights=temp$ipw,
+                             type.measure="mse",
+                             nfolds=5,
+                             foldid=fold.assign,
+                             alpha=1)
+  }
+  # Grab variables associated with model at lambda.1se and lambda.min
+  out.1se  <- lapply(cv.out, function(x) grabvars(x, s="lambda.1se"))
+  out.min  <- lapply(cv.out, function(x) grabvars(x, s="lambda.min"))
+  vars.1se <- lapply(out.1se, function(x) as.character(x$vars[,1]))
+  vars.min <- lapply(out.min, function(x) as.character(x$vars[,1]))
+  
+  # For each candidate model, fit Y ~ X for the treatment arm of interest
+  fit.1se <- fit.min <- list()
+  
+  for(k in 1:length(vars.1se)){
+    # one SE rule
+    if ( length(vars.1se[[k]]) > 1 ) {
+      X.selected <- vars.1se[[k]][vars.1se[[k]] != "(Intercept)"]
+      X.selected <- paste(X.selected, collapse=" + ")
+      model <- paste(Ys[j], "~", X.selected, sep=" ")
+      fit <- lm(formula=model, data=sub0)
+      adjusted.r2 <- summary(fit)$adj.r.squared
+      f.stat <- summary(fit)$fstatistic[1]
+      f.pvalue <- 1-pf(q=summary(fit)$fstatistic[1], df1=summary(fit)$fstatistic[2], df2=summary(fit)$fstatistic[3])
+      fit.1se[[k]] <- c(X.selected, adjusted.r2, f.stat, f.pvalue)      
+    } else {
+      adjusted.r2 <- NA
+      f.stat <- NA
+      f.pvalue <- NA
+      fit.1se[[k]] <- c(NA, adjusted.r2, f.stat, f.pvalue)
+    }
+    
+    # min lambda
+    if ( length(vars.min[[k]]) > 1 ) {
+      X.selected <- vars.min[[k]][vars.min[[k]] != "(Intercept)"]
+      X.selected <- paste(X.selected, collapse=" + ")
+      model <- paste(Ys[j], "~", X.selected, sep=" ")
+      fit <- lm(formula=model, data=sub0)
+      adjusted.r2 <- summary(fit)$adj.r.squared
+      f.stat <- summary(fit)$fstatistic[1]
+      f.pvalue <- 1-pf(q=summary(fit)$fstatistic[1], df1=summary(fit)$fstatistic[2], df2=summary(fit)$fstatistic[3])
+      fit.min[[k]] <- c(X.selected, adjusted.r2, f.stat, f.pvalue)      
+    } else {
+      adjusted.r2 <- NA
+      f.stat <- NA
+      f.pvalue <- NA
+      fit.min[[k]] <- c(NA, adjusted.r2, f.stat, f.pvalue)      
+    }
+  }
+  
+  # collect all results
+  fit.min <- do.call(rbind, fit.min)
+  fit.1se <- do.call(rbind, fit.1se)
+  fit.min <- as.data.frame(fit.min)
+  fit.1se <- as.data.frame(fit.1se)
+  names(fit.1se) <- names(fit.min) <- c("variables","adj.r2","f.stat","f.pvalue")
+  fit.min[,1] <- as.character(fit.min[,1])
+  fit.1se[,1] <- as.character(fit.1se[,1])
+  for(v in 2:ncol(fit.min)) fit.min[,v] <- as.numeric(as.character(fit.min[,v]))
+  for(v in 2:ncol(fit.1se)) fit.1se[,v] <- as.numeric(as.character(fit.1se[,v]))
+  
+  # choose variables that are (1) not missing, (2) with highest adj R2, and (3) with significant f stat p value
+  choose.min <- fit.min[!is.na(fit.min$variables) & fit.min$adj.r2==max(fit.min$adj.r2, na.rm=TRUE) & fit.min$f.pvalue < 0.05,]
+  choose.1se <- fit.1se[!is.na(fit.1se$variables) & fit.1se$adj.r2==max(fit.1se$adj.r2, na.rm=TRUE) & fit.1se$f.pvalue < 0.05,]
+
+  # store result - lambda min
+  if(nrow(choose.min)==0){
+    cv0.min[[j]] <- rep(NA,4)
+  } else {
+    cv0.min[[j]] <- choose.min <- choose.min[!duplicated(choose.min),]
+  }
+  
+  # store result - lambda 1se
+  if(nrow(choose.1se)==0){
+    cv0.1se[[j]] <- rep(NA,4)
+  } else {
+    cv0.1se[[j]] <- choose.1se <- choose.1se[!duplicated(choose.1se),]
+  }
+}
+
+# ============== #
+# Z=1 (monitoring)
+# ============== # 
+
+# initialize object to store results
+# nested lists of 9 (one per outcome)
+# one for model selected at lambda.min (cv1.min)
+# another for model selected at lambda.1se (cv1.1se)
+# one for a final set of covs we choose (cv1)
+cv1.min <- cv1.1se <- list()
+# iterate over outcomes
+  for(j in 1:length(Ys)){
+  # cat("\n ******************* Outcome: ", Ys[j] ," ******************* \n", sep="")
+  # pre-process data conditional on outcome of interest
+  if(j %in% 1:3) {
+    subX <- Xs[!(Xs %in% c(wh.vars, bh.vars))]  # if excluding hisp tester FE add: , tbfe
+  } else if(j %in% 4:6) {
+    subX <- Xs[!(Xs %in% c(wb.vars, bh.vars))]  # if excluding black tester FE add: , tafe
+  } else if(j %in% 7:9) {
+    subX <- Xs[!(Xs %in% c(wb.vars, wh.vars))]  # if excluding white tester FE add: , tcfe
+  }
+  temp <- sub1[,names(sub1) %in% c(Ys[j], subX, "ipw")]
+  temp <- temp[apply(temp, 1, function(x) sum(is.na(x))) == 0,]  # kick out missing (required for cv.glmnet)
+  
+  # initialize object to store
+  cv.out <- list()
+  # initialize vector of fold assignments
+  folds0 <- c(rep(1, round(nrow(temp)/nfolds, 0)),
+              rep(2, round(nrow(temp)/nfolds, 0)),
+              rep(3, round(nrow(temp)/nfolds, 0)),
+              rep(4, round(nrow(temp)/nfolds, 0)),
+              rep(5, nrow(temp) - 4*round(nrow(temp)/nfolds, 0) ))
+  # iterate over shuffled fold assignments
+  for(i in 1:niter){
+    # cat(i, " ", sep="")
+    # shuffle folds
+    fold.assign <- folds0[sample(1:nrow(temp), nrow(temp), replace=FALSE)]
+    # lasso
+    cv.out[[i]] <- cv.glmnet(x=as.matrix(temp[,!(names(temp) %in% c(Ys[j], "ipw"))]),
+                             y=as.vector(temp[[Ys[j]]]),
+                             weights=temp$ipw,
+                             type.measure="mse",
+                             nfolds=5,
+                             foldid=fold.assign,
+                             alpha=1)
+  }
+  # Grab variables associated with model at lambda.1se and lambda.min
+  out.1se  <- lapply(cv.out, function(x) grabvars(x, s="lambda.1se"))
+  out.min  <- lapply(cv.out, function(x) grabvars(x, s="lambda.min"))
+  vars.1se <- lapply(out.1se, function(x) as.character(x$vars[,1]))
+  vars.min <- lapply(out.min, function(x) as.character(x$vars[,1]))
+  
+  # For each candidate model, fit Y ~ X for the treatment arm of interest
+  fit.1se <- fit.min <- list()
+  for(k in 1:length(vars.1se)){
+    # one SE rule
+    if ( length(vars.1se[[k]]) > 1 ) {
+      X.selected <- vars.1se[[k]][vars.1se[[k]] != "(Intercept)"]
+      X.selected <- paste(X.selected, collapse=" + ")
+      model <- paste(Ys[j], "~", X.selected, sep=" ")
+      fit <- lm(formula=model, data=sub1)
+      adjusted.r2 <- summary(fit)$adj.r.squared
+      f.stat <- summary(fit)$fstatistic[1]
+      f.pvalue <- 1-pf(q=summary(fit)$fstatistic[1], df1=summary(fit)$fstatistic[2], df2=summary(fit)$fstatistic[3])
+      fit.1se[[k]] <- c(X.selected, adjusted.r2, f.stat, f.pvalue)      
+    } else {
+      adjusted.r2 <- NA
+      f.stat <- NA
+      f.pvalue <- NA
+      fit.1se[[k]] <- c(NA, adjusted.r2, f.stat, f.pvalue)
+    }
+    # min lambda
+    if ( length(vars.min[[k]]) > 1 ) {
+      X.selected <- vars.min[[k]][vars.min[[k]] != "(Intercept)"]
+      X.selected <- paste(X.selected, collapse=" + ")
+      model <- paste(Ys[j], "~", X.selected, sep=" ")
+      fit <- lm(formula=model, data=sub1)
+      adjusted.r2 <- summary(fit)$adj.r.squared
+      f.stat <- summary(fit)$fstatistic[1]
+      f.pvalue <- 1-pf(q=summary(fit)$fstatistic[1], df1=summary(fit)$fstatistic[2], df2=summary(fit)$fstatistic[3])
+      fit.min[[k]] <- c(X.selected, adjusted.r2, f.stat, f.pvalue)      
+    } else {
+      adjusted.r2 <- NA
+      f.stat <- NA
+      f.pvalue <- NA
+      fit.min[[k]] <- c(NA, adjusted.r2, f.stat, f.pvalue)      
+    }
+  }
+  
+  # collect all results
+  fit.min <- do.call(rbind, fit.min)
+  fit.1se <- do.call(rbind, fit.1se)
+  fit.min <- as.data.frame(fit.min)
+  fit.1se <- as.data.frame(fit.1se)
+  names(fit.1se) <- names(fit.min) <- c("variables","adj.r2","f.stat","f.pvalue")
+  fit.min[,1] <- as.character(fit.min[,1])
+  fit.1se[,1] <- as.character(fit.1se[,1])
+  for(v in 2:ncol(fit.min)) fit.min[,v] <- as.numeric(as.character(fit.min[,v]))
+  for(v in 2:ncol(fit.1se)) fit.1se[,v] <- as.numeric(as.character(fit.1se[,v]))
+  
+  # choose variables that are (1) not missing, (2) with highest adj R2, and (3) with significant f stat p value
+  choose.min <- fit.min[!is.na(fit.min$variables) & fit.min$adj.r2==max(fit.min$adj.r2, na.rm=TRUE) & fit.min$f.pvalue < 0.05,]
+  choose.1se <- fit.1se[!is.na(fit.1se$variables) & fit.1se$adj.r2==max(fit.1se$adj.r2, na.rm=TRUE) & fit.1se$f.pvalue < 0.05,]
+  
+  # store result - lambda min
+  if(nrow(choose.min)==0){
+    cv1.min[[j]] <- rep(NA,4)
+  } else {
+    cv1.min[[j]] <- choose.min <- choose.min[!duplicated(choose.min),]
+  }
+  
+  # store result - lambda 1se
+  if(nrow(choose.1se)==0){
+    cv1.1se[[j]] <- rep(NA,4)
+  } else {
+    cv1.1se[[j]] <- choose.1se <- choose.1se[!duplicated(choose.1se),]
+  }
+  
+  }
+
+# ============== #
+# Z=2 (punitive)
+# ============== # 
+
+# initialize object to store results
+# nested lists of 9 (one per outcome)
+# one for model selected at lambda.min (cv2.min)
+# another for model selected at lambda.1se (cv2.1se)
+# one for a final set of covs we choose (cv1)
+cv2.min <- cv2.1se <- list()
+# iterate over outcomes
+  for(j in 1:length(Ys)){
+  # cat("\n ******************* Outcome: ", Ys[j] ," ******************* \n", sep="")
+  # pre-process data conditional on outcome of interest
+  if(j %in% 1:3) {
+    subX <- Xs[!(Xs %in% c(wh.vars, bh.vars))]  # if excluding hisp tester FE add: , tbfe
+  } else if(j %in% 4:6) {
+    subX <- Xs[!(Xs %in% c(wb.vars, bh.vars))]  # if excluding black tester FE add: , tafe
+  } else if(j %in% 7:9) {
+    subX <- Xs[!(Xs %in% c(wb.vars, wh.vars))]  # if excluding white tester FE add: , tcfe
+  }
+  temp <- sub2[,names(sub2) %in% c(Ys[j], subX, "ipw")]
+  temp <- temp[apply(temp, 1, function(x) sum(is.na(x))) == 0,]  # kick out missing (required for cv.glmnet)
+  # initialize object to store
+  cv.out <- list()
+  # initialize vector of fold assignments
+  folds0 <- c(rep(1, round(nrow(temp)/nfolds, 0)),
+              rep(2, round(nrow(temp)/nfolds, 0)),
+              rep(3, round(nrow(temp)/nfolds, 0)),
+              rep(4, round(nrow(temp)/nfolds, 0)),
+              rep(5, nrow(temp) - 4*round(nrow(temp)/nfolds, 0) ))
+  # iterate over shuffled fold assignments
+  for(i in 1:niter){
+    # cat(i, " ", sep="")
+    # shuffle folds
+    fold.assign <- folds0[sample(1:nrow(temp), nrow(temp), replace=FALSE)]
+    # lasso
+    cv.out[[i]] <- cv.glmnet(x=as.matrix(temp[,!(names(temp) %in% c(Ys[j], "ipw"))]),
+                             y=as.vector(temp[[Ys[j]]]),
+                             weights=temp$ipw,
+                             type.measure="mse",
+                             nfolds=5,
+                             foldid=fold.assign,
+                             alpha=1)
+  }
+  # Grab variables associated with model at lambda.1se and lambda.min
+  out.1se <- lapply(cv.out, function(x) grabvars(x, s="lambda.1se"))
+  out.min <- lapply(cv.out, function(x) grabvars(x, s="lambda.min"))
+  vars.1se <- lapply(out.1se, function(x) as.character(x$vars[,1]))
+  vars.min <- lapply(out.min, function(x) as.character(x$vars[,1]))
+  # For each candidate model, fit Y ~ X for the treatment arm of interest
+  fit.1se <- fit.min <- list()
+  for(k in 1:length(vars.1se)){
+    # one SE rule
+    if ( length(vars.1se[[k]]) > 1 ) {
+      X.selected <- vars.1se[[k]][vars.1se[[k]] != "(Intercept)"]
+      X.selected <- paste(X.selected, collapse=" + ")
+      model <- paste(Ys[j], "~", X.selected, sep=" ")
+      fit <- lm(formula=model, data=sub2)
+      adjusted.r2 <- summary(fit)$adj.r.squared
+      f.stat <- summary(fit)$fstatistic[1]
+      f.pvalue <- 1-pf(q=summary(fit)$fstatistic[1], df1=summary(fit)$fstatistic[2], df2=summary(fit)$fstatistic[3])
+      fit.1se[[k]] <- c(X.selected, adjusted.r2, f.stat, f.pvalue)      
+    } else {
+      adjusted.r2 <- NA
+      f.stat <- NA
+      f.pvalue <- NA
+      fit.1se[[k]] <- c(NA, adjusted.r2, f.stat, f.pvalue)
+    }
+    
+    # min lambda
+    if ( length(vars.min[[k]]) > 1 ) {
+      X.selected <- vars.min[[k]][vars.min[[k]] != "(Intercept)"]
+      X.selected <- paste(X.selected, collapse=" + ")
+      model <- paste(Ys[j], "~", X.selected, sep=" ")
+      fit <- lm(formula=model, data=sub2)
+      adjusted.r2 <- summary(fit)$adj.r.squared
+      f.stat <- summary(fit)$fstatistic[1]
+      f.pvalue <- 1-pf(q=summary(fit)$fstatistic[1], df1=summary(fit)$fstatistic[2], df2=summary(fit)$fstatistic[3])
+      fit.min[[k]] <- c(X.selected, adjusted.r2, f.stat, f.pvalue)      
+    } else {
+      adjusted.r2 <- NA
+      f.stat <- NA
+      f.pvalue <- NA
+      fit.min[[k]] <- c(NA, adjusted.r2, f.stat, f.pvalue)      
+    }
+  }
+  
+  # collect all results
+  fit.min <- do.call(rbind, fit.min)
+  fit.1se <- do.call(rbind, fit.1se)
+  fit.min <- as.data.frame(fit.min)
+  fit.1se <- as.data.frame(fit.1se)
+  names(fit.1se) <- names(fit.min) <- c("variables","adj.r2","f.stat","f.pvalue")
+  fit.min[,1] <- as.character(fit.min[,1])
+  fit.1se[,1] <- as.character(fit.1se[,1])
+  for(v in 2:ncol(fit.min)) fit.min[,v] <- as.numeric(as.character(fit.min[,v]))
+  for(v in 2:ncol(fit.1se)) fit.1se[,v] <- as.numeric(as.character(fit.1se[,v]))
+  
+  # choose variables that are (1) not missing, (2) with highest adj R2, and (3) with significant f stat p value
+  choose.min <- fit.min[!is.na(fit.min$variables) & fit.min$adj.r2==max(fit.min$adj.r2, na.rm=TRUE) & fit.min$f.pvalue < 0.05,]
+  choose.1se <- fit.1se[!is.na(fit.1se$variables) & fit.1se$adj.r2==max(fit.1se$adj.r2, na.rm=TRUE) & fit.1se$f.pvalue < 0.05,]
+  
+  # store result - lambda min
+  if(nrow(choose.min)==0){
+    cv2.min[[j]] <- rep(NA,4)
+  } else {
+    cv2.min[[j]] <- choose.min <- choose.min[!duplicated(choose.min),]
+  }
+  
+  # store result - lambda 1se
+  if(nrow(choose.1se)==0){
+    cv2.1se[[j]] <- rep(NA,4)
+  } else {
+    cv2.1se[[j]] <- choose.1se <- choose.1se[!duplicated(choose.1se),]
+  }
+  
+  }
+
+# Label items in list
+names(cv0.1se) <- names(cv1.1se) <- names(cv2.1se) <- Ys
+names(cv0.min) <- names(cv1.min) <- names(cv2.min) <- Ys
+
+# For each, check for more than one result, if so check if the predictors are the same
+#  Deduplicate selected variables (if multiple results returned)
+for(i in 1:length(cv0.min)){
+
+  # cv0.min
+  if( !is.null(nrow(cv0.min[[i]])) ) {
+    if ( nrow(cv0.min[[i]]) > 1 ) {
+      var.comp <- strsplit(cv0.min[[i]][,1], " + ", fixed=TRUE)
+      var.comp <- lapply(var.comp, function(x) sort(x))
+      # if there are the same # of vars then
+      if ( apply(as.matrix(sapply(var.comp, length)), MARGIN=2, function(x) sum(length(unique(x)))==1) ) {
+        # combine all
+        var.comp <- do.call(cbind, var.comp)
+        # if all vars are the same
+        if ( mean(apply(var.comp, MARGIN=1, function(x) sum(length(unique(x)))==1))==1 ) {
+          cv0.min[[i]] <- cv0.min[[i]][sample(1:nrow(cv0.min[[i]]), 1),]
+        } 
+      }
+    }
+  }
+  
+  # cv1.min
+  if( !is.null(nrow(cv1.min[[i]])) ) {
+    if ( nrow(cv1.min[[i]]) > 1 ) {
+      var.comp <- strsplit(cv1.min[[i]][,1], " + ", fixed=TRUE)
+      var.comp <- lapply(var.comp, function(x) sort(x))
+      # if there are the same # of vars then
+      if ( apply(as.matrix(sapply(var.comp, length)), MARGIN=2, function(x) sum(length(unique(x)))==1) ) {
+        # combine all
+        var.comp <- do.call(cbind, var.comp)
+        # if all vars are the same
+        if ( mean(apply(var.comp, MARGIN=1, function(x) sum(length(unique(x)))==1))==1 ) {
+          cv1.min[[i]] <- cv1.min[[i]][sample(1:nrow(cv1.min[[i]]), 1),]
+        } 
+      }
+    }
+  }
+  
+  # cv2.min
+  if( !is.null(nrow(cv2.min[[i]])) ) {
+    if ( nrow(cv2.min[[i]]) > 1 ) {
+      var.comp <- strsplit(cv2.min[[i]][,1], " + ", fixed=TRUE)
+      var.comp <- lapply(var.comp, function(x) sort(x))
+      # if there are the same # of vars then
+      if ( apply(as.matrix(sapply(var.comp, length)), MARGIN=2, function(x) sum(length(unique(x)))==1) ) {
+        # combine all
+        var.comp <- do.call(cbind, var.comp)
+        # if all vars are the same
+        if ( mean(apply(var.comp, MARGIN=1, function(x) sum(length(unique(x)))==1))==1 ) {
+          cv2.min[[i]] <- cv2.min[[i]][sample(1:nrow(cv2.min[[i]]), 1),]
+        } 
+      }
+    }
+  }
+}
+
+# Collapse into a matrix
+select0 <- do.call(rbind, cv0.min)
+select1 <- do.call(rbind, cv1.min)
+select2 <- do.call(rbind, cv2.min)
+
+# Save output - these are the selected covariates by arm
+write.csv(select0, "misc_covselect_select0.csv", row.names=TRUE)
+write.csv(select1, "misc_covselect_select1.csv", row.names=TRUE)
+write.csv(select2, "misc_covselect_select2.csv", row.names=TRUE)
+```
+
+### Covariate Adjusted ITT Estimation
+
+The following code estimates covariate adjusted ITT effects and bootstraps 95% confidence intervals. Note: This code chunk takes awhile to run. This code chunk also saves main results used to build Table A15, which is done in the next code chunk below.
+
+```{r covadjitt, echo=T, eval=T, warning=F}
+##=============================================================================##
+## Covariate Adjustment
+##=============================================================================##
+
+# define outcomes 
+Ys <- c("index.wb", "ncb_wb", "noff_wb",
+        "index.wh", "ncb_wh", "noff_wh",
+        "index.bh", "ncb_bh", "noff_bh")
+
+# read in covariates from variable selection procedure
+
+select0 <- read.csv("misc_covselect_select0.csv", header=TRUE, colClasses="character")
+select1 <- read.csv("misc_covselect_select1.csv", header=TRUE, colClasses="character")
+select2 <- read.csv("misc_covselect_select2.csv", header=TRUE, colClasses="character")
+
+names(select0)[1] <- names(select1)[1] <- names(select2)[1] <- "Y"
+
+# create block FE dummy variables
+block.dums <- model.matrix(~ -1 + as.factor(block), data=dat)
+colnames(block.dums) <- paste("block", 1:17, sep="")
+#head(block.dums)
+dat <- cbind(dat, block.dums)
+#names(dat)
+
+# subset data by treatment arm
+
+sub0 <- dat[dat$TA==0,]
+sub1 <- dat[dat$TA==1,]
+sub2 <- dat[dat$TA==2,]
+
+# create vector of block fixed effect variables
+blockfe <- paste("block", 2:17, sep="")
+
+# create probability of treatment (for 2 group estimator)
+# if in regime 1, equal probability of treatment
+
+dat$pt10 <- ifelse(dat$regime==1, .5, ifelse(dat$regime==2, 1/3, .5))
+dat$pt20 <- ifelse(dat$regime==1, .5, ifelse(dat$regime==2, 1/3, .5))
+dat$pt21 <- ifelse(dat$regime==1, .5, ifelse(dat$regime==2, .5, .5))
+
+# create ipw from probability of treatment (for 2 group estimator)
+
+dat$ipw10 <- ifelse(dat$TA == 1, 1/dat$pt10, ifelse(dat$TA==0, 1/(1-dat$pt10), NA))
+dat$ipw20 <- ifelse(dat$TA == 2, 1/dat$pt20, ifelse(dat$TA==0, 1/(1-dat$pt20), NA))
+dat$ipw21 <- ifelse(dat$TA == 2, 1/dat$pt21, ifelse(dat$TA==1, 1/(1-dat$pt21), NA))
+
+# create vectors of covariates by treatment arm and outcome
+c0 <- lapply(strsplit(select0$variables, " + ", fixed=TRUE), function(x) c(x[!is.na(x)], blockfe))
+c1 <- lapply(strsplit(select1$variables, " + ", fixed=TRUE), function(x) c(x[!is.na(x)], blockfe))
+c2 <- lapply(strsplit(select2$variables, " + ", fixed=TRUE), function(x) c(x[!is.na(x)], blockfe))
+
+# covariate adjusted estimates with empirical sandwich variance estimator
+
+esv2g.10 <- NULL
+esv2g.20 <- NULL
+esv2g.21 <- NULL
+
+for(i in 1:length(Ys)){
+  esv2g.10[[i]] <- esv2g(data=dat,zvar="TA",Yvar=Ys[i],covs0=c0[[i]],covs1=c1[[i]],z1=1,z0=0,ipwvar="ipw10",ptvar="pt10")
+  esv2g.20[[i]] <- esv2g(data=dat,zvar="TA",Yvar=Ys[i],covs0=c0[[i]],covs1=c2[[i]],z1=2,z0=0,ipwvar="ipw20",ptvar="pt20")
+  esv2g.21[[i]] <- esv2g(data=dat,zvar="TA",Yvar=Ys[i],covs0=c1[[i]],covs1=c2[[i]],z1=2,z0=1,ipwvar="ipw21",ptvar="pt21")  
+}
+
+
+# bootstrap
+
+set.seed(20150229) # set seed locally for reproducible bootstrap estimates
+
+bs2g.10 <- NULL
+bs2g.20 <- NULL
+bs2g.21 <- NULL
+
+# Define loop functions to run in parallel
+bsfun_1 <- function(i) {
+  bs(data=dat, sims=5000, zvar="TA", Yvar=Ys[i], z0=0, z1=1, X0=c0[[i]], X1=c1[[i]], ipwvar="ipw10",ptvar="pt10")
+}
+
+bsfun_2 <- function(i) {
+  bs(data=dat, sims=5000, zvar="TA", Yvar=Ys[i], z0=0, z1=2, X0=c0[[i]], X1=c2[[i]], ipwvar="ipw20",ptvar="pt20")
+}
+
+bsfun_3 <- function(i) {
+  bs(data=dat, sims=5000, zvar="TA", Yvar=Ys[i], z0=1, z1=2, X0=c1[[i]], X1=c2[[i]], ipwvar="ipw21",ptvar="pt21")  
+}
+
+bs2g.10 <- parallel::mclapply(1:length(Ys), bsfun_1)
+bs2g.20 <- parallel::mclapply(1:length(Ys), bsfun_2)
+bs2g.21 <- parallel::mclapply(1:length(Ys), bsfun_3)
+
+# assemble results into matrices
+
+bs10.est <- sapply(bs2g.10, function(x) unlist(x[1,]))
+bs10.var <- sapply(bs2g.10, function(x) unlist(x[2,]))
+bs10.se <- sapply(bs2g.10, function(x) unlist(x[3,]))
+
+bs20.est <- sapply(bs2g.20, function(x) unlist(x[1,]))
+bs20.var <- sapply(bs2g.20, function(x) unlist(x[2,]))
+bs20.se <- sapply(bs2g.20, function(x) unlist(x[3,]))
+
+bs21.est <- sapply(bs2g.21, function(x) unlist(x[1,]))
+bs21.var <- sapply(bs2g.21, function(x) unlist(x[2,]))
+bs21.se <- sapply(bs2g.21, function(x) unlist(x[3,]))
+
+es10 <- do.call(rbind, lapply(esv2g.10, function(x) c(x$est, x$se)))
+es20 <- do.call(rbind, lapply(esv2g.20, function(x) c(x$est, x$se)))
+es21 <- do.call(rbind, lapply(esv2g.21, function(x) c(x$est, x$se)))
+
+# Save bootstrap estimates
+save(bs10.est, bs10.var, bs10.se,
+     bs20.est, bs20.var, bs20.se,
+     bs21.est, bs21.var, bs21.se,
+     file="misc_bootstrap_estimates.RData")
+
+# Read in bootstrap estimates
+load("misc_bootstrap_estimates.RData")
+
+#============================================================================#
+# calculate 95% confidence intervals -- bootstrap
+# (1) first order normal approximation
+# (2) basic bootstrap interval
+# (3) bootstrap percentile interval
+# (4) studentized bootstrap interval
+# (5) adjusted bootstrap percentile (BCa) interval
+#============================================================================#
+
+
+#==========================#
+# (1) normal approximation
+#==========================#
+
+# if the ITT estimate is approximately normal, then
+# 95% CI is  ITT.hat - b +/- z(alpha)*sqrt(nu)
+# where z(alpha) = critical value of z at alpha=0.05
+# ITT.hat = estimate (non-bootstrapped, get this from the empirical sandwich estimation output)
+# b = mean of bootstrap estimate - ITT.hat
+# nu = (1/(R-1))* SUM (over draws) (estimated mean - mean of bootstrap estimates)^2
+# R = number of bootstrap draws (sims=5000 for us)
+
+R = 5000
+
+# M-C
+bs10.normalci <- list()
+for(i in 1:length(Ys)){
+  nu <- (1/(R-1)) *   sum((bs10.est[,i]-mean(bs10.est[,i]))^2)
+  lci <- es10[i,1] - (mean(bs10.est[,i]) - es10[i,1]) - qnorm(p=0.975, mean=0, sd=1) * sqrt(nu)
+  uci <- es10[i,1] - (mean(bs10.est[,i]) - es10[i,1]) + qnorm(p=0.975, mean=0, sd=1) * sqrt(nu)
+  bs10.normalci[[i]] <- c(lci, uci)
+}
+
+# P-C
+bs20.normalci <- list()
+for(i in 1:length(Ys)){
+  nu <- (1/(R-1)) *   sum((bs20.est[,i]-mean(bs20.est[,i]))^2)
+  lci <- es20[i,1] - (mean(bs20.est[,i]) - es20[i,1]) - qnorm(p=0.975, mean=0, sd=1) * sqrt(nu)
+  uci <- es20[i,1] - (mean(bs20.est[,i]) - es20[i,1]) + qnorm(p=0.975, mean=0, sd=1) * sqrt(nu)
+  bs20.normalci[[i]] <- c(lci, uci)
+}
+
+# P-M
+bs21.normalci <- list()
+for(i in 1:length(Ys)){
+  nu <- (1/(R-1)) *   sum((bs21.est[,i]-mean(bs21.est[,i]))^2)
+  lci <- es21[i,1] - (mean(bs21.est[,i]) - es21[i,1]) - qnorm(p=0.975, mean=0, sd=1) * sqrt(nu)
+  uci <- es21[i,1] - (mean(bs21.est[,i]) - es21[i,1]) + qnorm(p=0.975, mean=0, sd=1) * sqrt(nu)
+  bs21.normalci[[i]] <- c(lci, uci)
+}
+
+
+bs10.normalci <- do.call(rbind, bs10.normalci)
+bs20.normalci <- do.call(rbind, bs20.normalci)
+bs21.normalci <- do.call(rbind, bs21.normalci)
+
+# bs10.normalci; bs20.normalci; bs21.normalci
+
+#==========================#
+# (2) basic bootstrap interval
+#==========================#
+
+# 2*t0 - quantile(t, c(.975, .025))
+
+bs10.basicci <- list()
+bs20.basicci <- list()
+bs21.basicci <- list()
+
+for(i in 1:length(Ys)){
+  bs10.basicci[[i]] <- 2*es10[i,1] - quantile(bs10.est[,i], c(.975, .025))
+  bs20.basicci[[i]] <- 2*es20[i,1] - quantile(bs20.est[,i], c(.975, .025))
+  bs21.basicci[[i]] <- 2*es21[i,1] - quantile(bs21.est[,i], c(.975, .025))
+}
+
+bs10.basicci <- do.call(rbind, bs10.basicci)
+bs20.basicci <- do.call(rbind, bs20.basicci)
+bs21.basicci <- do.call(rbind, bs21.basicci)
+colnames(bs10.basicci) <- colnames(bs20.basicci) <- colnames(bs21.basicci) <- c("lower","upper")
+
+# bs10.basicci; bs20.basicci; bs21.basicci
+
+#==========================#
+# (3) percentile interval
+#==========================#
+
+# use empirical quantities at the 2.5th and 97.5th percentiles
+
+bs10.pctci <- t(apply(bs10.est, 2, function(x) quantile(x, c(.025, .975)))) 
+bs20.pctci <- t(apply(bs20.est, 2, function(x) quantile(x, c(.025, .975))))
+bs21.pctci <- t(apply(bs21.est, 2, function(x) quantile(x, c(.025, .975))))
+
+# bs10.pctci; bs20.pctci; bs21.pctci
+
+
+
+#==========================#
+# (4) studentized boot ci
+#==========================#
+
+# generalization of student t statistic to bootstrap setting
+# requires variance for bootstrap ITT etsimates computed from each bs sample
+
+# first calculate test statistic for each bs sample
+bs10.t <- bs20.t <- bs21.t <- matrix(NA, ncol=length(Ys), nrow=R)
+
+for(i in 1:length(Ys)){
+  bs10.t[,i] <- (bs10.est[,i] - es10[i,1])/bs10.se[,i]
+  bs20.t[,i] <- (bs20.est[,i] - es20[i,1])/bs20.se[,i]
+  bs21.t[,i] <- (bs21.est[,i] - es21[i,1])/bs21.se[,i]
+}
+
+# from the empirical distribution of the test statistics,
+# we calculate order statistics/quantiles:
+#   t*[(R+1)(1-alpha)]
+#   t*[(R+1)(alpha)]
+
+bs10.q <- apply(bs10.t, 2, function(x) quantile(x, c(.975, .025)))
+bs20.q <- apply(bs20.t, 2, function(x) quantile(x, c(.975, .025)))
+bs21.q <- apply(bs21.t, 2, function(x) quantile(x, c(.975, .025)))
+
+# the studentized CI is given by
+# lower: ITT.hat - SE.hat * t*[(R+1)(1-alpha)]
+# upper: ITT.hat - SE.hat * t*[(R+1)(alpha)]
+
+bs10.tci <- bs20.tci <- bs21.tci <- NULL
+for(i in 1:length(Ys)){
+  bs10.tci[[i]] <- es10[i,1] - sd(bs10.est[,i]) * bs10.q[,i]
+  bs20.tci[[i]] <- es20[i,1] - sd(bs20.est[,i]) * bs20.q[,i]
+  bs21.tci[[i]] <- es21[i,1] - sd(bs21.est[,i]) * bs21.q[,i]  
+}
+
+bs10.tci <- do.call(rbind, bs10.tci)
+bs20.tci <- do.call(rbind, bs20.tci)
+bs21.tci <- do.call(rbind, bs21.tci)
+colnames(bs10.tci) <- colnames(bs20.tci) <- colnames(bs21.tci) <- c("lower", "upper")
+
+# bs10.tci; bs20.tci; bs21.tci
+
+
+
+#============================================================================#
+# calculate 95% confidence intervals -- empirical sandwich variance estimator
+#============================================================================#
+
+# calculate df by model
+
+n10 <- rep(NA, length(Ys))
+n20 <- rep(NA, length(Ys))
+n21 <- rep(NA, length(Ys))
+
+for(i in 1:length(Ys)){
+  n10[i] <- sum(apply(dat[dat$TA %in% c(0,1),names(dat) %in% c(Ys[i],c0[[i]],c1[[i]],"TA")] ,1,function(x) sum(is.na(x))==0))
+  n20[i] <- sum(apply(dat[dat$TA %in% c(0,2),names(dat) %in% c(Ys[i],c0[[i]],c2[[i]],"TA")] ,1,function(x) sum(is.na(x))==0))
+  n21[i] <- sum(apply(dat[dat$TA %in% c(1,2),names(dat) %in% c(Ys[i],c1[[i]],c2[[i]],"TA")] ,1,function(x) sum(is.na(x))==0))  
+}
+
+# calculate DF as the two-group sample size, minus the sum of the number of covariates across treatment arms,
+# minus 3 (2 for the intercepts of arm-specific models; 1 for the treatment-control difference)
+df10 <- n10 - (sapply(c0, length)+sapply(c1, length)) - 3
+df20 <- n20 - (sapply(c0, length)+sapply(c2, length)) - 3
+df21 <- n21 - (sapply(c1, length)+sapply(c2, length)) - 3
+
+cv10 <- -qt(p=0.025, df=df10, lower.tail=TRUE)
+cv20 <- -qt(p=0.025, df=df20, lower.tail=TRUE)
+cv21 <- -qt(p=0.025, df=df21, lower.tail=TRUE)
+
+# form confidence interval
+
+es10.ci <- cbind(es10[,1]-abs(cv10)*es10[,2], es10[,1]+abs(cv10)*es10[,2])
+es20.ci <- cbind(es20[,1]-abs(cv20)*es20[,2], es20[,1]+abs(cv20)*es20[,2])
+es21.ci <- cbind(es21[,1]-abs(cv21)*es21[,2], es21[,1]+abs(cv21)*es21[,2])
+
+
+#============================================================================#
+# plot estimates and confidence intervals
+#============================================================================#
+
+histYlabs <- c("Interactions index\n(White-Black)", "Callback\n(White-Black)", "Offer\n(White-Black)",
+               "Interactions index\n(White-Hispanic)", "Callback\n(White-Hispanic)", "Offer\n(White-Hispanic)",
+               "Interactions index\n(Black-Hispanic)", "Callback\n(Black-Hispanic)", "Offer\n(Black-Hispanic)")
+
+# cbind(Ys, histYlabs)
+
+xrange <- max(abs(range(c(es10[,1], bs10.est))))
+xrange <- c(-xrange, xrange)
+
+pdf("misc_bootstrap_bs_10_est.pdf", height=10, width=10)
+#par(mfrow=c(3,3))
+layout(matrix(c(1:9,0,10,0), nrow=4, ncol=3, byrow=TRUE), widths=c(3,3,3), heights=c(3,3,3,3), respect=FALSE)
+for(i in 1:length(Ys)){
+  hist(bs10.est[,i], breaks=55, main=histYlabs[i], xlab="bootstrap ITT estimate \n (monitoring v. control)", xlim=xrange, cex.axis=0.8)
+  abline(v=es10[i,1], col="red", lwd=2, lty=1)  
+  abline(v=mean(bs10.est[,i]), col="black", lwd=2, lty=2)
+  abline(v=c(mean(bs10.est[,i])-sd(bs10.est[,i]), mean(bs10.est[,i])+sd(bs10.est[,i])), col="grey80", lwd=1, lty=4)  
+  abline(v=es10.ci[i,], col="grey80", lwd=2, lty=2)
+  abline(v=bs10.basicci[i,], col=rgb(1,0,1,.5), lty=2)
+  abline(v=bs10.pctci[i,], col=rgb(0,0,1,.3), lty=3)
+  abline(v=bs10.normalci[i,], col=rgb(0,1,0,.5), lty=4)
+  abline(v=bs10.tci[i,], col=rgb(1,0,0,.3), lty=2)  
+}
+plot(c(0,10), c(0,10), pch="", xaxt="n", yaxt="n", main="", xlab="", ylab="", bty="n")
+legend(0,10,legend=c("ITT Estimate",
+                     "Mean of Bootstrap ITT Estimates",
+                     "+/- 1 sd, Bootstrap ITT Estimates",
+                     "95% CI, Empirical Sandwich Var.",
+                     "95% CI, Basic Bootstrap",                    
+                     "95% CI, Percentile Bootstrap",
+                     "95% CI, Normal Approx. Bootstrap",
+                     "95% CI, Studentized Bootstrap"),
+       col=c("red", "black", "grey80", "grey80", rgb(1,0,1,.5), rgb(0,0,1,.3), rgb(0,1,0,.5), rgb(1,0,0,.3)),
+       lwd=rep(1.5, 8),
+       lty=c(1,2,4,2,2,3,4,2),
+       bty="n",
+       seg.len=4)
+invisible( dev.off())
+
+
+
+xrange <- max(abs(range(c(es20[,1], bs20.est))))
+xrange <- c(-xrange, xrange)
+
+pdf("misc_bootstrap_bs_20_est.pdf", height=10, width=10)
+#par(mfrow=c(3,3))
+layout(matrix(c(1:9,0,10,0), nrow=4, ncol=3, byrow=TRUE), widths=c(3,3,3), heights=c(3,3,3,3), respect=FALSE)
+for(i in 1:length(Ys)){
+  hist(bs20.est[,i], breaks=55, main=histYlabs[i], xlab="bootstrap ITT estimate \n (punitive v. control)", xlim=xrange, cex.axis=0.8)
+  abline(v=es20[i,1], col="red", lwd=2, lty=1)  
+  abline(v=mean(bs20.est[,i]), col="black", lwd=2, lty=2)
+  abline(v=c(mean(bs20.est[,i])-sd(bs20.est[,i]), mean(bs20.est[,i])+sd(bs20.est[,i])), col="grey80", lwd=1, lty=4)  
+  abline(v=es20.ci[i,], col="grey80", lwd=2, lty=2)
+  abline(v=bs20.basicci[i,], col=rgb(1,0,1,.5), lty=2)
+  abline(v=bs20.pctci[i,], col=rgb(0,0,1,.3), lty=3)
+  abline(v=bs20.normalci[i,], col=rgb(0,1,0,.5), lty=4)
+  abline(v=bs20.tci[i,], col=rgb(1,0,0,.3), lty=2)  
+}
+plot(c(0,10), c(0,10), pch="", xaxt="n", yaxt="n", main="", xlab="", ylab="", bty="n")
+legend(0,10,legend=c("ITT Estimate",
+                     "Mean of Bootstrap ITT Estimates",
+                     "+/- 1 sd, Bootstrap ITT Estimates",
+                     "95% CI, Empirical Sandwich Var.",
+                     "95% CI, Basic Bootstrap",                    
+                     "95% CI, Percentile Bootstrap",
+                     "95% CI, Normal Approx. Bootstrap",
+                     "95% CI, Studentized Bootstrap"),
+       col=c("red", "black", "grey80", "grey80", rgb(1,0,1,.5), rgb(0,0,1,.3), rgb(0,1,0,.5), rgb(1,0,0,.3)),
+       lwd=rep(1.5, 8),
+       lty=c(1,2,4,2,2,3,4,2),
+       bty="n",
+       seg.len=4)
+invisible( dev.off())
+
+
+
+xrange <- max(abs(range(c(es21[,1], bs21.est))))
+xrange <- c(-xrange, xrange)
+
+pdf("misc_bootstrap_bs_21_est.pdf", height=10, width=10)
+#par(mfrow=c(3,3))
+layout(matrix(c(1:9,0,10,0), nrow=4, ncol=3, byrow=TRUE), widths=c(3,3,3), heights=c(3,3,3,3), respect=FALSE)
+for(i in 1:length(Ys)){
+  hist(bs21.est[,i], breaks=55, main=histYlabs[i], xlab="bootstrap ITT estimate \n (punitive v. monitoring)", xlim=xrange, cex.axis=0.8)
+  abline(v=es21[i,1], col="red", lwd=2, lty=1)  
+  abline(v=mean(bs21.est[,i]), col="black", lwd=2, lty=2)
+  abline(v=c(mean(bs21.est[,i])-sd(bs21.est[,i]), mean(bs21.est[,i])+sd(bs21.est[,i])), col="grey80", lwd=1, lty=4)  
+  abline(v=es21.ci[i,], col="grey80", lwd=2, lty=2)
+  abline(v=bs21.basicci[i,], col=rgb(1,0,1,.5), lty=2)
+  abline(v=bs21.pctci[i,], col=rgb(0,0,1,.3), lty=3)
+  abline(v=bs21.normalci[i,], col=rgb(0,1,0,.5), lty=4)
+  abline(v=bs21.tci[i,], col=rgb(1,0,0,.3), lty=2)  
+}
+plot(c(0,10), c(0,10), pch="", xaxt="n", yaxt="n", main="", xlab="", ylab="", bty="n")
+legend(0,10,legend=c("ITT Estimate",
+                     "Mean of Bootstrap ITT Estimates",
+                     "+/- 1 sd, Bootstrap ITT Estimates",
+                     "95% CI, Empirical Sandwich Var.",
+                     "95% CI, Basic Bootstrap",                    
+                     "95% CI, Percentile Bootstrap",
+                     "95% CI, Normal Approx. Bootstrap",
+                     "95% CI, Studentized Bootstrap"),
+       col=c("red", "black", "grey80", "grey80", rgb(1,0,1,.5), rgb(0,0,1,.3), rgb(0,1,0,.5), rgb(1,0,0,.3)),
+       lwd=rep(1.5, 8),
+       lty=c(1,2,4,2,2,3,4,2),
+       bty="n",
+       seg.len=4)
+invisible( dev.off())
+
+
+
+#============================================================================#
+# assemble table
+#============================================================================#
+
+# Prep labels for output tables -- outcome labels, table section titles, table subsection titles
+
+Ylabs <- c("Index measure of favorable in-person interactions",
+           "Received post-visit callback",
+           "Received post-visit offer")
+Ylabs <- rep(Ylabs, 9)
+# Ylabs
+
+seclabs <- c("I. Monitoring vs. Control", "II. Punitive vs. Control", "III. Punitive vs. Monitoring")
+sublabs <- rep(c("A. White vs. Black", "B. White vs. Hispanic", "C. Black vs. Hispanic"), 3)
+
+# Covariate adjusted estimates - table shell:
+#   Col 1 = Covariate adj ITT estimate
+#   Col 2 = Empirical sandwich SE estimate
+#   Col 3 = Empirical sandwich 95% CI
+#   Col 4 = Mean of bootstrap ITT estimates
+#   Col 5 = SD of bootstrap ITT estimates
+#   Col 6 = 95% CI - Studentized t
+#   Col 7 = 95% CI - Basic bootstrap
+#   Col 8 = 95% CI - Percentile bootstrap
+#   Col 9 = 95% CI - Normal Approx
+
+tab10 <- cbind(round(es10, 3),
+               apply(es10.ci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               round(apply(bs10.est, 2, mean),3),
+               round(apply(bs10.est, 2, sd),3),
+               apply(bs10.tci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs10.basicci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs10.pctci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs10.normalci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") )
+)
+# tab10
+
+tab20 <- cbind(round(es20, 3),
+               apply(es20.ci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               round(apply(bs20.est, 2, mean),3),
+               round(apply(bs20.est, 2, sd),3),
+               apply(bs20.tci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs20.basicci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs20.pctci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs20.normalci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") )
+)
+# tab20
+
+tab21 <- cbind(round(es21, 3),
+               apply(es21.ci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               round(apply(bs21.est, 2, mean),3),
+               round(apply(bs21.est, 2, sd),3),
+               apply(bs21.tci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs21.basicci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs21.pctci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") ),
+               apply(bs21.normalci, 1, function(x) paste("[",round(x[1],3),",",round(x[2],3),"]",sep="") )
+)
+# tab21
+
+
+# stack panels into single table
+tab.out <- rbind(tab10, tab20, tab21)
+
+# add parentheses to SE estimates
+tab.out[,2] <- paste("(", tab.out[,2], ")", sep="")
+tab.out[,5] <- paste("(", tab.out[,5], ")", sep="")
+
+tab.out <- cbind(Ylabs, tab.out)
+
+colnames(tab.out) <- c("Outcome Measure", "Estimate", "SE", "95% CI", "Mean Bootstrap Est.", "Bootstrap SE", "Studentized", "Basic", "Percentile", "Normal Approx.")
+
+# tab.out
+
+# Write an unformatted table
+write.csv(tab.out, "out_tablea15_itt_blockfe_covadj_full_UNFORMATTED.csv", row.names=FALSE)
+
+start.rows <- seq(1,27,3)
+stop.rows <- start.rows + 2
+# start.rows; stop.rows
+
+tab.out2 <- list()
+seclabs.index <- 0
+for(i in 1:length(start.rows)){
+  if(i %in% c(1,4,7)){
+    seclabs.index <- seclabs.index + 1
+    tab.out2[[i]] <- rbind(c(seclabs[seclabs.index], rep(NA,9)),
+                           c(sublabs[i], rep(NA,9)),
+                           tab.out[start.rows[i]:stop.rows[i],])        
+  } else {
+    tab.out2[[i]] <- rbind(c(sublabs[i], rep(NA,9)), tab.out[start.rows[i]:stop.rows[i],])    
+  }
+}
+
+
+tab.out2 <- do.call(rbind, tab.out2)
+# tab.out2
+
+## Export results to csv
+
+write.csv(tab.out2, "out_tablea15_itt_blockfe_covadj_full.csv", row.names=FALSE)
+```
+
+The following code builds Table A15 which includes the covariate adjusted ITT estimates (produced by the code above) and the unadjusted ITT estimates (from Table A7, for comparison)
+
+```{r tablea15, echo=T, eval=T, warning=F}
+### Unadjusted estimates (two-group estimator)
+
+un <- read.csv("out_tablea7_itt_2g_blockfe_nocovs.csv",
+               header=TRUE, stringsAsFactors = FALSE)
+un <- un[,c(1,2,3,6)]
+
+### Covariate adjusted estimates (two-group estimator)
+
+ca <- read.csv("out_tablea15_itt_blockfe_covadj_full.csv",
+               header=TRUE, stringsAsFactors=FALSE)
+
+# get rid of normal approx CIs
+ca <- ca[,-10]
+
+### Combine unadjusted with covariate adjusted
+x <- cbind(ca[,1], un[,2:4], ca[,2:9])
+
+# clean up colnames
+names(x) <- c("Outcome Measure", "Estimate", "SE", "95% CI", "Estimate", "SE", "95% CI", "Mean", "SE", "95% Studentized CI", "95% Basic CI", "95% Percentile CI")
+
+# Show table in Rmd output
+kable(x, col.names=c("Outcome Measure", "Unadj. (Est.)", "Unadj. (SE)", "Unadj. (95% CI)",
+                     "Cov adj (Est.)", "Cov adj (SE)", "Cov adj (95% CI)",
+                     "Cov adj with bootstrap (Mean)", "Cov adj with bootstrap (SE)",
+                     "Cov adj with bootstrap (95% Studentized CI)",
+                     "Cov adj with bootstrap (95% Basic CI)",
+                     "Cov adj with bootstrap (95% Percentile CI)"),
+      caption="**Table A15.**")
+```
+
+```{r, eval=T, echo=F, warning=F, include=FALSE}
+##### NOTE: set eval=T to export tex; eval=F suppresses tex output in the Rmd output
+### Format to export as tex
+out <- print(xtable(x, align="llrrr|rrr|rrrrr", digits=3), include.rownames=FALSE)
+out <- unlist(strsplit(out, "\n"))
+
+out <- gsub("A. White vs. Black", "\\underline{A. White vs. Black}", out, fixed=TRUE)
+out <- gsub("B. White vs. Hispanic", "\\underline{B. White vs. Hispanic}", out, fixed=TRUE)
+out <- gsub("C. Black vs. Hispanic", "\\underline{C. Black vs. Hispanic}", out, fixed=TRUE)
+out <- gsub("I. Monitoring vs. Control", "\\textbf{I. Monitoring vs. Control}", out, fixed=TRUE)
+out <- gsub("II. Punitive vs. Control", "\\hline \\textbf{II. Punitive vs. Control}", out, fixed=TRUE)
+out <- gsub("III. Punitive vs. Monitoring", "\\hline \\textbf{III. Punitive vs. Monitoring}", out, fixed=TRUE)
+
+out <- c(out[3:4],
+         "\\resizebox{1.4\\textwidth}{!}{",
+         out[5:6],
+         " & \\multicolumn{3}{c|}{Unadjusted} & \\multicolumn{3}{c|}{Covariate adjusted} & \\multicolumn{5}{c}{Covariate adjusted - bootstrap} \\\\ ",
+         out[7:49],
+         "}",
+         "\\caption[Covariate adjusted ITT]{Covariate adjusted ITT estimates. The left panel presents the main estimates with block fixed effects and inverse probability weights. The middle panel presents covariate adjusted estimates with inverse probability weights; the uncertainty estimates are based on the empirical sandwich variance estimator by \\citet{YuanZhangDavidian:2012}. The right panel presents bootstrapped covariate adjusted estimates with 95\\% Studentized, basic, and percentile confidence intervals.}",
+         "\\label{covadj}",
+         out[50])
+
+cat(out, file="out_tablea15_covadjitt.tex", sep="\n")
+```
+
