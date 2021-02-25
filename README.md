@@ -2,12 +2,9 @@
 
 ********************************************************************************
 * REPLICATION ARCHIVE
-* 
 * "Can the Government Deter Discrimination? 
 *   Evidence from a Randomized Intervention in New York City"
-* 
 * Albert H Fang, Andrew M Guess, and Macartan Humphreys
-* 
 * Date: 25 October 2018
 ********************************************************************************
 
